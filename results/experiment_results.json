@@ -1,0 +1,41 @@
+[
+  {
+    "lambda": 0.0,
+    "test_accuracy": 61.57,
+    "best_test_accuracy": 61.71,
+    "sparsity_pct": 0.0,
+    "layer_sparsities": {
+      "fc1": 0.0,
+      "fc2": 0.0,
+      "fc3": 0.0,
+      "fc4": 0.0
+    },
+    "time_s": 951.7590498924255
+  },
+  {
+    "lambda": 0.001,
+    "test_accuracy": 60.41,
+    "best_test_accuracy": 60.41,
+    "sparsity_pct": 99.95793977389896,
+    "layer_sparsities": {
+      "fc1": 99.99707539876303,
+      "fc2": 99.8779296875,
+      "fc3": 98.7945556640625,
+      "fc4": 89.84375
+    },
+    "time_s": 1052.1093900203705
+  },
+  {
+    "lambda": 0.01,
+    "test_accuracy": 59.58,
+    "best_test_accuracy": 59.58,
+    "sparsity_pct": 99.99649018633083,
+    "layer_sparsities": {
+      "fc1": 100.0,
+      "fc2": 100.0,
+      "fc3": 99.871826171875,
+      "fc4": 98.515625
+    },
+    "time_s": 8529.405388116837
+  }
+]
