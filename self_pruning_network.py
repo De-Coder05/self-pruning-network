@@ -380,7 +380,7 @@ def run_experiment(
         "model":              model,
     }
 
-PALETTE = ["
+PALETTE = ["#2196F3", "#FF9800", "#E91E63"]
 
 def _style_axis(ax: plt.Axes) -> None:
     
@@ -402,7 +402,7 @@ def plot_gate_distribution(results: List[Dict], out: str) -> str:
 
         ax.hist(g, bins=100, color=clr, edgecolor="white",
                 linewidth=0.3, alpha=0.85)
-        ax.axvline(GATE_THRESHOLD, color="
+        ax.axvline(GATE_THRESHOLD, color="#E74C3C", ls="--", lw=1.5,
                    label=f"Threshold = {GATE_THRESHOLD}")
         ax.set_title(f"λ = {lam:.1e}\nSparsity {sp:.1f} %",
                      fontsize=12, fontweight="bold")
@@ -504,7 +504,7 @@ def plot_sparsity_accuracy_tradeoff(results: List[Dict], out: str) -> str:
     accuracies = [r["test_accuracy"] for r in results]
     lambdas    = [r["lambda"]        for r in results]
 
-    ax.plot(sparsities, accuracies, "o-", color="
+    ax.plot(sparsities, accuracies, "o-", color="#4A90D9", lw=2, ms=10,
             markeredgecolor="white", markeredgewidth=2)
 
     for s, a, lam in zip(sparsities, accuracies, lambdas):
