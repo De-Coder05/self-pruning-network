@@ -26,3 +26,7 @@ At $\lambda = 0.001$, the network successfully pruned 99.96% of its parameters. 
 
 ## 4. Gate Distribution
 At $\lambda = 0.001$, the gate distribution is heavily bimodal. The vast majority of gates are crushed to 0.0 by the L1 penalty (pruned), while a very small selection of critical gates is pushed near 1.0 by the classification gradient.
+
+---
+
+**GitHub Repository:** [https://github.com/De-Coder05/self-pruning-network](https://github.com/De-Coder05/self-pruning-network)
