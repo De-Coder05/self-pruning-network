@@ -1,20 +1,4 @@
-#!/usr/bin/env python3
-"""
-Self-Pruning Neural Network for CIFAR-10
-=========================================
 
-A neural network that learns to identify and dynamically remove its own weakest
-connections during training through learnable gate parameters and L1 sparsity
-regularization.
-
-The key innovation is the PrunableLinear layer, which augments each weight with
-a learnable "gate" scalar. Through L1 regularization on gate values, the network
-learns to drive unnecessary gates to zero, effectively pruning connections and
-adapting its architecture on the fly.
-
-Author : Devansh Wadhwani
-Project: Tredence Analytics — AI Engineering Internship 2025 Case Study
-"""
 
 import os
 import math
@@ -32,21 +16,15 @@ import torchvision
 import torchvision.transforms as transforms
 
 import matplotlib
-matplotlib.use("Agg")  # Non-interactive backend for headless environments
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  GLOBAL CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════════════
 
 SEED         = 42
 DATA_DIR     = "./data"
 RESULTS_DIR  = "./results"
 
-# Detect best available accelerator (CUDA > MPS > CPU)
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
 elif torch.backends.mps.is_available():
@@ -54,23 +32,18 @@ elif torch.backends.mps.is_available():
 else:
     DEVICE = torch.device("cpu")
 
-# Lambda values for the sparsity-vs-accuracy trade-off experiment
-# Low → minimal pruning, Medium → moderate, High → aggressive
 LAMBDA_VALUES = [0.0, 0.001, 0.01]
 
-# Training hyper-parameters
 BATCH_SIZE    = 128
 EPOCHS        = 30
 LEARNING_RATE = 1e-3
 GATE_LR       = 1e-2
 WEIGHT_DECAY  = 1e-4
 
-# A gate whose sigmoid value falls below this threshold is considered "pruned"
 GATE_THRESHOLD = 1e-2
 
-
 def set_seed(seed: int = SEED) -> None:
-    """Ensure full reproducibility across runs and devices."""
+    
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
@@ -78,65 +51,22 @@ def set_seed(seed: int = SEED) -> None:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  PART 1 — THE "PRUNABLE" LINEAR LAYER
-# ═══════════════════════════════════════════════════════════════════════════════
-
 class PrunableLinear(nn.Module):
-    """
-    A custom linear layer that supports self-pruning through learnable gates.
-
-    Every weight  w_ij  is paired with a learnable gate score  s_ij.
-    During the forward pass the gate scores are transformed through a sigmoid
-    to produce gate values  g_ij = σ(s_ij) ∈ (0, 1), and the effective
-    ("pruned") weights become  w'_ij = w_ij · g_ij.
-
-    When a gate value converges to ≈ 0, the corresponding weight is
-    effectively removed from the computation graph. An L1 penalty on the
-    sum of gate values during training actively drives unnecessary gates
-    toward zero.
-
-    Gradient flow
-    ─────────────
-    ∂L/∂w_ij       = ∂L/∂output · x · g_ij
-    ∂L/∂s_ij       = ∂L/∂output · x · w_ij · σ'(s_ij)
-
-    Both paths use only standard differentiable operations, so gradients
-    flow correctly to *both* weight and gate-score parameters.
-
-    Args:
-        in_features  — size of each input sample
-        out_features — size of each output sample
-    """
 
     def __init__(self, in_features: int, out_features: int) -> None:
         super().__init__()
         self.in_features  = in_features
         self.out_features = out_features
 
-        # ── Standard learnable weight & bias ────────────────────────────
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias   = nn.Parameter(torch.empty(out_features))
 
-        # ── Gate-score tensor (same shape as weight) ────────────────────
-        # Each element will be passed through sigmoid → gate ∈ (0, 1)
         self.gate_scores = nn.Parameter(torch.empty(out_features, in_features))
 
         self._initialize_parameters()
 
-    # ────────────────────────────────────────────────────────────────────
     def _initialize_parameters(self) -> None:
-        """
-        Weight  — Kaiming uniform (He et al., 2015), the standard for
-                   ReLU-activated networks.
-        Bias    — Uniform ∈ [−1/√fan_in, +1/√fan_in], matching the
-                   PyTorch nn.Linear convention.
-        Gates   — Uniform(-0.5, 0.5) so that σ(gates) is initially centered 
-                   near 0.5. The gates start "undecided" instead of fully open,
-                   preventing instantaneous saturation and allowing clear 
-                   classification gradients to organize them before pruning.
-        """
+        
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
 
         fan_in = self.in_features
@@ -145,28 +75,20 @@ class PrunableLinear(nn.Module):
 
         nn.init.uniform_(self.gate_scores, -0.5, 0.5)
 
-    # ────────────────────────────────────────────────────────────────────
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Gated forward pass.
+        
+        gates          = torch.sigmoid(self.gate_scores)
+        pruned_weights = self.weight * gates
+        return F.linear(x, pruned_weights, self.bias)
 
-        1. Compute sigmoid gates from gate scores.
-        2. Element-wise multiply weights by gates ⇒ pruned weights.
-        3. Apply standard linear transformation with pruned weights.
-        """
-        gates          = torch.sigmoid(self.gate_scores)       # g ∈ (0, 1)
-        pruned_weights = self.weight * gates                   # w' = w ⊙ g
-        return F.linear(x, pruned_weights, self.bias)          # y  = xW'^T + b
-
-    # ────────────────────── helper utilities ────────────────────────────
     @torch.no_grad()
     def get_gate_values(self) -> torch.Tensor:
-        """Return current gate values (after sigmoid) without gradients."""
+        
         return torch.sigmoid(self.gate_scores)
 
     @torch.no_grad()
     def get_sparsity(self, threshold: float = GATE_THRESHOLD) -> float:
-        """Fraction of gate values below `threshold` (i.e. "pruned")."""
+        
         gates = self.get_gate_values()
         return (gates < threshold).sum().item() / gates.numel()
 
@@ -174,33 +96,12 @@ class PrunableLinear(nn.Module):
         return (f"in_features={self.in_features}, "
                 f"out_features={self.out_features}")
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  PART 2 — NETWORK ARCHITECTURE
-# ═══════════════════════════════════════════════════════════════════════════════
-
 class SelfPruningNetwork(nn.Module):
-    """
-    Feed-forward classifier for CIFAR-10 built entirely from PrunableLinear
-    layers so that every weight in the network can be independently gated.
-
-    Architecture
-    ────────────
-    Input (3 072)
-      → PrunableLinear(512) → BatchNorm → ReLU
-      → PrunableLinear(256) → BatchNorm → ReLU
-      → PrunableLinear(128) → BatchNorm → ReLU
-      → PrunableLinear(10)  → logits
-
-    Batch-normalisation layers are placed between the prunable linear
-    transformations and the activations to stabilize training as gates
-    dynamically rescale the effective weights.
-    """
 
     def __init__(self) -> None:
         super().__init__()
 
-        self.flatten = nn.Flatten()                       # 32×32×3 → 3 072
+        self.flatten = nn.Flatten()
 
         self.fc1 = PrunableLinear(3 * 32 * 32, 512)
         self.bn1 = nn.BatchNorm1d(512)
@@ -211,9 +112,8 @@ class SelfPruningNetwork(nn.Module):
         self.fc3 = PrunableLinear(256, 128)
         self.bn3 = nn.BatchNorm1d(128)
 
-        self.fc4 = PrunableLinear(128, 10)                # no activation (logits)
+        self.fc4 = PrunableLinear(128, 10)
 
-    # ────────────────────────────────────────────────────────────────────
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.flatten(x)
         x = F.relu(self.bn1(self.fc1(x)))
@@ -222,27 +122,18 @@ class SelfPruningNetwork(nn.Module):
         x = self.fc4(x)
         return x
 
-    # ────────────────────────────────────────────────────────────────────
     def compute_sparsity_loss(self) -> torch.Tensor:
-        """
-        L1 sparsity regularisation — the sum of **all** gate values across
-        every PrunableLinear layer in the network.
-
-        Because gate values are sigmoid outputs (always ≥ 0), the L1 norm
-        (∑|g_ij|) simplifies to a plain summation (∑ g_ij).  Minimising
-        this term pushes gates toward 0, thereby pruning connections.
-        """
+        
         loss = torch.tensor(0.0, device=next(self.parameters()).device)
         for m in self.modules():
             if isinstance(m, PrunableLinear):
                 loss = loss + torch.sigmoid(m.gate_scores).sum()
         return loss
 
-    # ────────────────────── inspection helpers ─────────────────────────
     @torch.no_grad()
     def get_layer_sparsities(self,
                              threshold: float = GATE_THRESHOLD) -> Dict[str, float]:
-        """Per-layer sparsity percentages."""
+        
         out: Dict[str, float] = {}
         for name, m in self.named_modules():
             if isinstance(m, PrunableLinear):
@@ -252,7 +143,7 @@ class SelfPruningNetwork(nn.Module):
     @torch.no_grad()
     def get_overall_sparsity(self,
                              threshold: float = GATE_THRESHOLD) -> float:
-        """Global sparsity percentage (across all layers)."""
+        
         pruned = total = 0
         for m in self.modules():
             if isinstance(m, PrunableLinear):
@@ -263,7 +154,7 @@ class SelfPruningNetwork(nn.Module):
 
     @torch.no_grad()
     def get_all_gate_values(self) -> np.ndarray:
-        """Flat numpy array of every gate value in the network."""
+        
         parts = []
         for m in self.modules():
             if isinstance(m, PrunableLinear):
@@ -283,21 +174,11 @@ class SelfPruningNetwork(nn.Module):
             "other":      total - weights - gates,
         }
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  DATA LOADING — CIFAR-10
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def get_data_loaders(
     batch_size: int = BATCH_SIZE,
     data_dir: str   = DATA_DIR,
 ) -> Tuple[DataLoader, DataLoader]:
-    """
-    Prepare CIFAR-10 data loaders with standard augmentation.
-
-    Training: random crop (padding=4), random horizontal flip, normalise.
-    Testing : normalise only (no augmentation for a fair evaluation).
-    """
+    
     mean = (0.4914, 0.4822, 0.4465)
     std  = (0.2023, 0.1994, 0.2010)
 
@@ -326,11 +207,6 @@ def get_data_loaders(
 
     return train_loader, test_loader
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  PART 3 — TRAINING & EVALUATION
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def train_one_epoch(
     model: SelfPruningNetwork,
     loader: DataLoader,
@@ -338,11 +214,7 @@ def train_one_epoch(
     lambda_s: float,
     device: torch.device,
 ) -> Dict[str, float]:
-    """
-    One full pass over the training set.
-
-    Loss = CrossEntropy(ŷ, y) + λ · ∑ σ(gate_scores)
-    """
+    
     model.train()
     cum_cls = cum_sp = cum_total = 0.0
     correct = total = 0
@@ -378,14 +250,13 @@ def train_one_epoch(
         "sparsity_pct": model.get_overall_sparsity(),
     }
 
-
 @torch.no_grad()
 def evaluate(
     model: SelfPruningNetwork,
     loader: DataLoader,
     device: torch.device,
 ) -> Dict[str, float]:
-    """Evaluate on the test set (no augmentation, no gradient tracking)."""
+    
     model.eval()
     cum_loss = 0.0
     correct  = total = 0
@@ -407,11 +278,6 @@ def evaluate(
         "sparsity_pct":  model.get_overall_sparsity(),
     }
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  EXPERIMENT RUNNER
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def run_experiment(
     lambda_s: float,
     train_loader: DataLoader,
@@ -419,12 +285,7 @@ def run_experiment(
     device: torch.device,
     epochs: int = EPOCHS,
 ) -> Dict:
-    """
-    Full training → evaluation pipeline for one λ value.
-
-    Returns a dict with final metrics, per-epoch history, gate values,
-    and a reference to the trained model.
-    """
+    
     banner = f"  EXPERIMENT · λ = {lambda_s:.1e}"
     print(f"\n{'═' * 70}")
     print(banner)
@@ -439,9 +300,6 @@ def run_experiment(
           f"gates: {info['gates']:,}  other: {info['other']:,}")
     print(f"  Device: {device}")
 
-    # Separate parameter groups: regular weights/biases get standard LR and weight decay,
-    # but the gate_scores get a much higher LR (to overcome the vanishing sigmoid derivative
-    # near 0) and zero weight decay (as they are already penalized by the L1 sparsity loss).
     weights_biases = []
     gate_params = []
     for name, param in model.named_parameters():
@@ -522,30 +380,16 @@ def run_experiment(
         "model":              model,
     }
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  VISUALISATION
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Colour palette used across all plots
-PALETTE = ["#2196F3", "#FF9800", "#E91E63"]
-
+PALETTE = ["
 
 def _style_axis(ax: plt.Axes) -> None:
-    """Apply a consistent visual style to a matplotlib axis."""
+    
     ax.grid(axis="both", alpha=0.2, linewidth=0.5)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-
 def plot_gate_distribution(results: List[Dict], out: str) -> str:
-    """
-    Histogram of gate values for each λ.
-
-    A successful experiment shows a *bimodal* distribution:
-        • a tall spike near 0  (pruned connections)
-        • a cluster near 1    (retained connections)
-    """
+    
     n = len(results)
     fig, axes = plt.subplots(1, n, figsize=(6 * n, 5))
     if n == 1:
@@ -558,7 +402,7 @@ def plot_gate_distribution(results: List[Dict], out: str) -> str:
 
         ax.hist(g, bins=100, color=clr, edgecolor="white",
                 linewidth=0.3, alpha=0.85)
-        ax.axvline(GATE_THRESHOLD, color="#E74C3C", ls="--", lw=1.5,
+        ax.axvline(GATE_THRESHOLD, color="
                    label=f"Threshold = {GATE_THRESHOLD}")
         ax.set_title(f"λ = {lam:.1e}\nSparsity {sp:.1f} %",
                      fontsize=12, fontweight="bold")
@@ -578,9 +422,8 @@ def plot_gate_distribution(results: List[Dict], out: str) -> str:
     print(f"  📊 Saved → {path}")
     return path
 
-
 def plot_training_curves(results: List[Dict], out: str) -> str:
-    """2×2 panel: test accuracy, cls loss, sparsity, train-vs-test accuracy."""
+    
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
     for i, res in enumerate(results):
@@ -590,13 +433,9 @@ def plot_training_curves(results: List[Dict], out: str) -> str:
         c   = PALETTE[i]
         lab = f"λ = {lam:.1e}"
 
-        # Test accuracy
         axes[0, 0].plot(ep, h["test_acc"], color=c, lw=2, label=lab)
-        # Classification loss
         axes[0, 1].plot(ep, h["cls_loss"], color=c, lw=2, label=lab)
-        # Sparsity
         axes[1, 0].plot(ep, h["sparsity"], color=c, lw=2, label=lab)
-        # Train (dashed) vs test accuracy
         axes[1, 1].plot(ep, h["train_acc"], color=c, lw=2, ls="--", alpha=0.5)
         axes[1, 1].plot(ep, h["test_acc"],  color=c, lw=2, label=lab)
 
@@ -620,9 +459,8 @@ def plot_training_curves(results: List[Dict], out: str) -> str:
     print(f"  📈 Saved → {path}")
     return path
 
-
 def plot_layer_sparsity(results: List[Dict], out: str) -> str:
-    """Grouped bar chart — per-layer sparsity for each λ."""
+    
     fig, ax = plt.subplots(figsize=(10, 6))
 
     layers = list(results[0]["layer_sparsities"].keys())
@@ -658,16 +496,15 @@ def plot_layer_sparsity(results: List[Dict], out: str) -> str:
     print(f"  📊 Saved → {path}")
     return path
 
-
 def plot_sparsity_accuracy_tradeoff(results: List[Dict], out: str) -> str:
-    """Scatter / line showing the sparsity-vs-accuracy Pareto frontier."""
+    
     fig, ax = plt.subplots(figsize=(8, 5))
 
     sparsities = [r["sparsity_pct"] for r in results]
     accuracies = [r["test_accuracy"] for r in results]
     lambdas    = [r["lambda"]        for r in results]
 
-    ax.plot(sparsities, accuracies, "o-", color="#4A90D9", lw=2, ms=10,
+    ax.plot(sparsities, accuracies, "o-", color="
             markeredgecolor="white", markeredgewidth=2)
 
     for s, a, lam in zip(sparsities, accuracies, lambdas):
@@ -686,11 +523,6 @@ def plot_sparsity_accuracy_tradeoff(results: List[Dict], out: str) -> str:
     plt.close(fig)
     print(f"  📈 Saved → {path}")
     return path
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  MAIN
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> List[Dict]:
     header = (
@@ -711,19 +543,16 @@ def main() -> List[Dict]:
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    # ── Data ────────────────────────────────────────────────────────────
     print("\n  Loading CIFAR-10 …")
     train_loader, test_loader = get_data_loaders()
     print(f"  Train: {len(train_loader.dataset):,} samples  "
           f"Test: {len(test_loader.dataset):,} samples")
 
-    # ── Experiments ─────────────────────────────────────────────────────
     all_results: List[Dict] = []
     for lam in LAMBDA_VALUES:
         result = run_experiment(lam, train_loader, test_loader, DEVICE, EPOCHS)
         all_results.append(result)
 
-    # ── Summary table ───────────────────────────────────────────────────
     print(f"\n\n{'═' * 70}")
     print("  COMPARATIVE SUMMARY")
     print(f"{'═' * 70}\n")
@@ -735,14 +564,12 @@ def main() -> List[Dict]:
               f"{r['sparsity_pct']:>9.2f}% "
               f"{r['time_s']:>9.1f}s")
 
-    # ── Plots ───────────────────────────────────────────────────────────
     print("\n  Generating visualisations …")
     plot_gate_distribution(all_results, RESULTS_DIR)
     plot_training_curves(all_results, RESULTS_DIR)
     plot_layer_sparsity(all_results, RESULTS_DIR)
     plot_sparsity_accuracy_tradeoff(all_results, RESULTS_DIR)
 
-    # ── Persist JSON ────────────────────────────────────────────────────
     serializable = []
     for r in all_results:
         serializable.append({
@@ -763,7 +590,6 @@ def main() -> List[Dict]:
     print(f"{'═' * 70}\n")
 
     return all_results
-
 
 if __name__ == "__main__":
     main()
